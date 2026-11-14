@@ -79,9 +79,7 @@ export async function saveModule(f) {
     try {
         const u = await admin(), company = id(f, 'company'), moduleId = text(f, 'module');
         const m = catalog.find(x => x.id === moduleId);
-        if (!m)
-            throw Error('Unknown module');
-        if (!canSelectModule(moduleId))
+        if (!m || !canSelectModule(moduleId))
             throw Error('Website payment collection is disabled');
         const allowed = f.getAll('roles').map(r => z.enum(roles).parse(r));
         const settings = z.record(z.string(), z.unknown()).parse(JSON.parse(String(f.get('settings') || '{}')));
@@ -101,7 +99,9 @@ export async function saveMember(f) {
                 throw Error('Unavailable');
             await workspace(c.slug, 'team-and-permissions', true, true);
         }
-        const email = z.email().parse(text(f, 'email', 254)).toLowerCase(), name = text(f, 'name', 120), role = z.enum(roles).parse(f.get('role')), password = f.get('password') ? passwordInput(f.get('password'), 14) : '';
+        const email = z.email().parse(text(f, 'email', 254)).toLowerCase(), name = text(f, 'name', 120), role = z.enum(roles).parse(f.get('role')), password = String(f.get('password') || '');
+        if (password)
+            passwordInput(password, 14);
         await limitWrite(u.id, company, 'membership');
         await db().begin(async (tx) => {
             let [member] = await tx `select id from users where email=${email}`;
@@ -133,14 +133,7 @@ export async function saveMember(f) {
 export async function removeMember(f) {
     try {
         const u = await admin(), company = id(f, 'company'), member = id(f, 'member');
-        await db().begin(async (tx) => {
-            const [target] = await tx `select role from memberships where company_id=${company} and user_id=${member} for update`;
-            if (target && String(target.role).toLowerCase() === 'owner') {
-                const [others] = await tx `select count(*)::int as n from memberships where company_id=${company} and user_id<>${member} and lower(role)='owner'`;
-                if (!others.n)
-                    throw Error('A company must keep at least one owner');
-            }
-            await tx `delete from memberships where company_id=${company} and user_id=${member}`; await audit(tx, u, company, 'Membership removed'); });
+        await db().begin(async (tx) => { await tx `delete from memberships where company_id=${company} and user_id=${member}`; await audit(tx, u, company, 'Membership removed'); });
         revalidatePath('/', 'layout');
     }
     catch (error) {
@@ -229,9 +222,7 @@ export async function markRead() {
 }
 export async function changePassword(f) {
     try {
-        const u = await requireUser(), current = passwordInput(f.get('current')), next = passwordInput(f.get('next'), 14);
-        if (next === current)
-            throw Error('Choose a new password');
+        const u = await requireUser(), current = passwordInput(f.get('current')), next = z.string().min(14).max(256).parse(f.get('next'));
         if (!await rateLimit('password-change', u.id, 5, 900))
             throw Error('Please wait before trying again');
         if (!await verifyPassword(current, u.password_hash))

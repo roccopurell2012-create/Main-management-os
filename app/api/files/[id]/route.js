@@ -1,3 +1,4 @@
+import {isRecordId} from '../../../record-id.js';
 import { db } from '../../../../lib/db.mjs';
 import { requireUser, workspace, ticketAccess } from '../../../../lib/auth.mjs';
 import { rateLimit } from '../../../../lib/rate-limit.mjs';
@@ -5,7 +6,7 @@ import { notFound } from 'next/navigation';
 export const runtime = 'nodejs';
 export async function GET(request, { params }) {
     const u = await requireUser(), { id } = await params;
-    if (!/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id))
+    if (!isRecordId(id))
         notFound();
     if (!await rateLimit('download', u.id, 120, 60))
         return new Response('Please try again later.', { status: 429, headers: { 'Retry-After': '60', 'Cache-Control': 'no-store' } });

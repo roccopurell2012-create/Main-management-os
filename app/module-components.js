@@ -24,7 +24,7 @@ export function ModuleSettings({company,modules}) {
  })}</div>;
 }
 export function ModuleTiles({slug,role,modules}) {
- const visible=catalog.filter(module=>canSelectModule(module.id)&&modules.some(row=>row.module_id===module.id&&row.enabled&&(row.allowed_roles??roles).includes(role))&&(module.id!=='team-and-permissions'||canManage(role)));
+ const visible=catalog.filter(module=>canSelectModule(module.id)&&modules.some(row=>row.module_id===module.id&&row.allowed_roles.includes(role))&&(module.id!=='team-and-permissions'||canManage(role)));
  return <div className="tiles">{visible.map(module=>{
   const contents=<><span aria-hidden="true" className="tile-icon">{module.icon}</span><h3>{module.name}</h3><p>{module.id==='customer-invoices'?'Invoice records only; no website payments.':module.description}</p>{canEnableModule(module.id)?<span className="tile-link">Open page ↗</span>:<><span className="badge">Coming soon</span><p>Selected for this workspace. This workflow is not yet available.</p></>}</>;
   return canEnableModule(module.id)?<Link className="tile" key={module.id} href={'/c/'+slug+'/'+module.id}>{contents}</Link>:<article className="tile coming-soon" key={module.id}>{contents}</article>;

@@ -1,0 +1,13 @@
+node_modules
+.next
+.env*
+!.env.example
+
+.vercel/
+*.log
+*.dump
+*.backup
+*.bak
+*.sql.gz
+coverage/
+.env.local.*
