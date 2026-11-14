@@ -1,0 +1,1 @@
+export default function Missing() { return <main id="main-content" tabIndex={-1}><h1>Workspace or page unavailable</h1><p>This page may be disabled, or your account may not have access.</p><a href='/'>Return to your workspaces</a></main>; }
