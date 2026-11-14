@@ -1,0 +1,27 @@
+{
+  "name": "business-portal",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "test": "node --test tests/*.test.mjs",
+    "migrate": "node --env-file-if-exists=.env.local scripts/migrate.mjs",
+    "owner": "node --env-file-if-exists=.env.local scripts/owner.mjs",
+    "maintenance": "node --env-file-if-exists=.env.local scripts/maintenance.mjs",
+    "check:secrets": "node scripts/check-secrets.mjs",
+    "workspace": "node --env-file-if-exists=.env.local scripts/workspace.mjs"
+  },
+  "dependencies": {
+    "next": "16.4.6",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "postgres": "4.1.1",
+    "zod": "4.6.7"
+  },
+  "engines": {
+    "node": ">=22.15.0"
+  },
+  "type": "module"
+}
