@@ -71,7 +71,7 @@ export async function saveCompany(f) {
         const companyId = f.get('id') ? id(f, 'id') : null;
         const name = text(f, 'name', 120), slug = z.string().regex(/^[a-z0-9]+(-[a-z0-9]+)*$/).max(70).parse(text(f, 'slug')), color = z.string().regex(/^#[0-9a-fA-F]{6}$/).parse(f.get('color')), status = z.enum(['active', 'suspended', 'archived']).parse(f.get('status')), contact = String(f.get('contact') ?? '').slice(0, 500), welcome = String(f.get('welcome') ?? '').slice(0, 1000), timezone = text(f, 'timezone', 100);
         new Intl.DateTimeFormat('en', { timeZone: timezone });
-        const logo = await upload(f.get('logo'), true);
+        const logo = await upload(f.get('logo'), true), loginImage = await upload(f.get('loginImage'), true);
         await db().begin(async (tx) => {
             let c;
             if (companyId) {
@@ -85,8 +85,16 @@ export async function saveCompany(f) {
             if (!c)
                 throw Error('Company not found');
             if (logo) {
+                const [previous] = await tx `select logo_id from companies where id=${c.id} for update`;
                 const [file] = await tx `insert into files(company_id,name,mime,data) values(${c.id},${logo.name},${logo.mime},${logo.data}) returning id`;
                 await tx `update companies set logo_id=${file.id} where id=${c.id}`;
+                if (previous?.logo_id) await tx `delete from files where id=${previous.logo_id} and company_id=${c.id} and message_id is null`;
+            }
+            if (loginImage) {
+                const [previous] = await tx `select login_image_id from companies where id=${c.id} for update`;
+                const [file] = await tx `insert into files(company_id,name,mime,data) values(${c.id},${loginImage.name},${loginImage.mime},${loginImage.data}) returning id`;
+                await tx `update companies set login_image_id=${file.id} where id=${c.id}`;
+                if (previous?.login_image_id) await tx `delete from files where id=${previous.login_image_id} and company_id=${c.id} and message_id is null`;
             }
             await audit(tx, u, c.id, 'Company details saved: ' + status);
         });
@@ -333,4 +341,79 @@ export async function deleteBusinessRecord(f) {
         await db() `delete from business_records where id=${id(f,'record')} and company_id=${c.id} and module_id=${moduleId}`;
         revalidatePath('/','layout');
     } catch(error) { rethrowActionError(error); }
+}
+export async function saveProfile(f) {
+    try {
+        const u = await requireUser(), name = text(f, 'name', 120), darkMode = f.get('darkMode') === 'on';
+        await limitWrite(u.id, 'profile', 'profile');
+        await db().begin(async tx => {
+            await tx `update users set name=${name},dark_mode=${darkMode} where id=${u.id}`;
+            await audit(tx, u, null, 'Account profile updated');
+        });
+        revalidatePath('/', 'layout');
+    } catch (error) { rethrowActionError(error); }
+}
+export async function requestPasswordReset(f) {
+    try {
+        const email = z.email().max(254).parse(text(f, 'email', 254)).toLowerCase();
+        const rawCompanySlug = String(f.get('companySlug') ?? '');
+        const requestedCompany = rawCompanySlug ? z.string().regex(/^[a-z0-9]+(-[a-z0-9]+)*$/).max(70).parse(rawCompanySlug) : null;
+        const source = process.env.VERCEL === '1' ? (await headers()).get('x-forwarded-for')?.split(',')[0]?.trim() : 'local';
+        if (!await rateLimit('password-reset-email', email, 4, 900) || !await rateLimit('password-reset-source', source || 'unknown', 20, 900))
+            redirect('/forgot-password?sent=1');
+        const [account] = await db() `select u.id,u.email,
+          exists(select 1 from memberships m join companies c on c.id=m.company_id where m.user_id=u.id and c.slug=${requestedCompany ?? ''} and c.status='active') as company_member
+          from users u where u.email=${email} and not u.disabled`;
+        if (!account)
+            redirect('/forgot-password?sent=1');
+        const companySlug = requestedCompany && account.company_member ? requestedCompany : null;
+        const token = randomBytes(32).toString('hex'), hashed = tokenHash(token);
+        await db().begin(async tx => {
+            await tx `delete from password_reset_tokens where user_id=${account.id}`;
+            await tx `insert into password_reset_tokens(token_hash,user_id,company_slug,expires_at) values(${hashed},${account.id},${companySlug},now()+interval '30 minutes')`;
+        });
+        if (!process.env.RESEND_API_KEY || !process.env.RESEND_FROM_EMAIL) {
+            console.error('password-reset-email-not-configured');
+            throw new Error('Password reset email is not configured yet.');
+        }
+        const baseUrl = (process.env.APP_BASE_URL || 'https://rocco-creations-portal.vercel.app').replace(/\/+$/, '');
+        const resetUrl = baseUrl + '/reset-password?token=' + token;
+        const response = await fetch('https://api.resend.com/emails', {
+            method: 'POST',
+            headers: { Authorization: 'Bearer ' + process.env.RESEND_API_KEY, 'Content-Type': 'application/json', 'Idempotency-Key': 'password-reset/' + hashed },
+            body: JSON.stringify({
+                from: process.env.RESEND_FROM_EMAIL,
+                to: [account.email],
+                subject: 'Reset your Rocco Creations workspace password',
+                html: '<p>We received a request to reset your workspace password.</p><p><a href="' + resetUrl + '">Choose a new password</a></p><p>This link expires in 30 minutes and can only be used once. If you did not request this, ignore this message.</p>',
+                text: 'We received a request to reset your workspace password. Open this one-time link within 30 minutes: ' + resetUrl + '. If you did not request this, ignore this message.'
+            }),
+            signal: AbortSignal.timeout(8000)
+        });
+        if (!response.ok) {
+            console.error('password-reset-email-failed', { status: response.status });
+            throw new Error('Password reset email could not be sent.');
+        }
+        redirect('/forgot-password?sent=1');
+    } catch (error) { rethrowActionError(error); }
+}
+export async function resetPassword(f) {
+    try {
+        const token = z.string().regex(/^[a-f0-9]{64}$/).parse(f.get('token'));
+        const password = passwordInput(f.get('password'), 8), confirm = passwordInput(f.get('confirmPassword'), 8);
+        if (password !== confirm) throw new Error('Passwords do not match.');
+        const hash = await passwordHash(password), hashed = tokenHash(token);
+        let companySlug = null;
+        await db().begin(async tx => {
+            const [reset] = await tx `delete from password_reset_tokens where token_hash=${hashed} and expires_at>now() returning user_id,company_slug`;
+            if (!reset) throw new Error('This password link has expired or was already used.');
+            await tx `update users set password_hash=${hash} where id=${reset.user_id}`;
+            await tx `delete from sessions where user_id=${reset.user_id}`;
+            await tx `delete from password_reset_tokens where user_id=${reset.user_id}`;
+            companySlug = reset.company_slug;
+        });
+        (await cookies()).delete('portal_session');
+        revalidatePath('/', 'layout');
+        redirect(companySlug ? '/c/' + companySlug + '/login?changed=1' : '/login?changed=1');
+    } catch (error) { rethrowActionError(error); }
 }
