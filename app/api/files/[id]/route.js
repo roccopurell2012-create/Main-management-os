@@ -11,8 +11,8 @@ export async function GET(request, { params }) {
     if (!await rateLimit('download', u.id, 120, 60))
         return new Response('Please try again later.', { status: 429, headers: { 'Retry-After': '60', 'Cache-Control': 'no-store' } });
     // Fetch metadata first: unauthorized callers never cause the blob to be materialized.
-    const [f] = await db() `select f.id,f.company_id,f.message_id,f.name,f.mime,c.slug,c.logo_id,m.ticket_id,m.private
-    from files f join companies c on c.id=f.company_id left join messages m on m.id=f.message_id where f.id=${id}`;
+    const [f] = await db() `select f.id,f.company_id,f.message_id,f.business_record_id,f.name,f.mime,c.slug,c.logo_id,m.ticket_id,m.private,r.module_id record_module_id
+    from files f join companies c on c.id=f.company_id left join messages m on m.id=f.message_id left join business_records r on r.id=f.business_record_id and r.company_id=f.company_id where f.id=${id}`;
     if (!f)
         notFound();
     await workspace(f.slug);
@@ -20,6 +20,10 @@ export async function GET(request, { params }) {
         if (f.private && !u.platform_admin)
             notFound();
         await ticketAccess(f.ticket_id);
+    }
+    else if (f.business_record_id) {
+        if (!f.record_module_id) notFound();
+        await workspace(f.slug, f.record_module_id);
     }
     else if (f.logo_id !== f.id && !u.platform_admin)
         notFound();
@@ -29,7 +33,7 @@ export async function GET(request, { params }) {
     const name = f.name.replace(/[^a-zA-Z0-9._ -]/g, '_').slice(0, 120) || 'attachment';
     return new Response(new Uint8Array(blob.data), { headers: {
             'Content-Type': f.mime,
-            'Content-Disposition': (f.message_id ? 'attachment' : 'inline') + '; filename="' + name + '"',
+            'Content-Disposition': (['image/png','image/jpeg','application/pdf'].includes(f.mime) ? 'inline' : 'attachment') + '; filename="' + name + '"',
             'Cache-Control': 'private, no-store',
             'X-Content-Type-Options': 'nosniff',
             'Content-Security-Policy': "default-src 'none'; sandbox",
