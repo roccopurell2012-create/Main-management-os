@@ -16,12 +16,14 @@ import { upload } from '../lib/uploads.mjs';
 const text = (f, k, max = 500) => z.string().trim().min(1).max(max).parse(f.get(k));
 const id = (f, k) => z.uuid().parse(f.get(k));
 async function audit(tx, u, c, action) { await tx `insert into audit_events(actor_id,company_id,action) values(${u.id},${c},${action})`; }
+const POLICY_VERSIONS = { terms: 'terms-draft-2026-11-15', privacy: 'privacy-2026-11-15', cookies: 'cookies-2026-11-15' };
 export async function login(f) {
     let loginStage = 'validate-input', loginPath = '/login';
     try {
         const email = z.email().max(254).parse(text(f, 'email', 254)).toLowerCase(), password = passwordInput(f.get('password'));
         const companySlug = f.get('companySlug') ? z.string().regex(/^[a-z0-9]+(-[a-z0-9]+)*$/).max(70).parse(f.get('companySlug')) : null;
         loginPath = companySlug ? '/c/' + companySlug + '/login' : '/login';
+        if (f.get('policyConsent') !== 'on') redirect(loginPath + '?error=consent');
         loginStage = 'rate-limit';
         const source = process.env.VERCEL === '1' ? (await headers()).get('x-forwarded-for')?.split(',')[0]?.trim() : 'local';
         if (!await loginRateLimit(email, source || 'unknown'))
@@ -44,7 +46,12 @@ export async function login(f) {
         const rememberMe = f.get('rememberMe') === 'on';
         const sessionSeconds = rememberMe ? 30 * 24 * 60 * 60 : 12 * 60 * 60;
         const token = randomBytes(32).toString('hex');
-        await sql `insert into sessions(token_hash,user_id,expires_at) values(${tokenHash(token)},${u.id},now()+(${sessionSeconds} * interval '1 second'))`;
+        await sql.begin(async tx => {
+            await tx `insert into policy_acceptances(user_id,terms_version,privacy_version,cookie_version,accepted_at)
+              values(${u.id},${POLICY_VERSIONS.terms},${POLICY_VERSIONS.privacy},${POLICY_VERSIONS.cookies},now())
+              on conflict(user_id,terms_version,privacy_version,cookie_version) do update set accepted_at=now()`;
+            await tx `insert into sessions(token_hash,user_id,expires_at) values(${tokenHash(token)},${u.id},now()+(${sessionSeconds} * interval '1 second'))`;
+        });
         (await cookies()).set('portal_session', token, { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax', path: '/', maxAge: sessionSeconds });
         redirect(companySlug ? '/c/' + companySlug : '/');
     }
@@ -156,7 +163,7 @@ export async function saveMember(f) {
             }
             if (!member) {
                 if (password.length < 8)
-                    throw Error('New accounts require a password of at least 14 characters');
+                    throw Error('New accounts require a password of at least 8 characters');
                 [member] = await tx `insert into users(email,name,password_hash) values(${email},${name},${await passwordHash(password)}) returning id`;
             }
             if (!u.platform_admin) {
@@ -264,6 +271,60 @@ export async function markRead() {
         rethrowActionError(error);
     }
 }
+export async function publishAnnouncement(f) {
+    try {
+        const u = await admin();
+        await limitWrite(u.id, 'platform', 'announcement');
+        const title = text(f, 'title', 120), body = text(f, 'body', 3000);
+        const target = String(f.get('company') || 'all');
+        const targetCompanyId = target === 'all' ? null : id(f, 'company');
+        let recipients = 0;
+        await db().begin(async tx => {
+            const companies = targetCompanyId
+              ? await tx `select c.id from companies c join modules n on n.company_id=c.id and n.module_id='notifications' and n.enabled where c.id=${targetCompanyId} and c.status='active'`
+              : await tx `select c.id from companies c join modules n on n.company_id=c.id and n.module_id='notifications' and n.enabled where c.status='active' order by c.name`;
+            if (!companies.length) throw Error('No active company with notifications enabled was selected.');
+            for (const company of companies) {
+                const inserted = await tx `insert into notifications(company_id,user_id,title,body)
+                  select ${company.id},m.user_id,${title},${body}
+                  from memberships m join users recipient on recipient.id=m.user_id and not recipient.disabled
+                  join modules n on n.company_id=m.company_id and n.module_id='notifications' and n.enabled and m.role=any(n.allowed_roles)
+                  where m.company_id=${company.id}
+                  returning id`;
+                recipients += inserted.length;
+                await audit(tx, u, company.id, 'Announcement published: ' + title);
+            }
+            if (!recipients) throw Error('There are no active company users allowed to receive notifications.');
+        });
+        revalidatePath('/', 'layout');
+        redirect('/admin/announcements?sent=1');
+    } catch (error) { rethrowActionError(error); }
+}
+export async function saveCompanySettings(f) {
+    try {
+        const slug = text(f, 'slug', 70), {u,c} = await workspace(slug, 'company-settings', true, true);
+        await limitWrite(u.id, c.id, 'company-settings');
+        const email = String(f.get('officeEmail') ?? '').trim().toLowerCase().slice(0,254);
+        if (email) z.email().parse(email);
+        const settings = {
+            officeEmail: email,
+            officePhone: String(f.get('officePhone') ?? '').trim().slice(0,40),
+            officeAddress: String(f.get('officeAddress') ?? '').trim().slice(0,250),
+            currency: z.enum(['ZAR','USD','EUR','GBP']).parse(f.get('currency')),
+            dateFormat: z.enum(['DD/MM/YYYY','YYYY-MM-DD']).parse(f.get('dateFormat')),
+            workWeek: z.enum(['Monday to Friday','Monday to Saturday','Monday to Sunday']).parse(f.get('workWeek')),
+            defaultRecordStatus: z.enum(statuses).parse(f.get('defaultRecordStatus')),
+            referencePrefix: String(f.get('referencePrefix') ?? '').trim().toUpperCase().replace(/[^A-Z0-9-]/g,'').slice(0,12)
+        };
+        const timezone = text(f, 'timezone', 100);
+        new Intl.DateTimeFormat('en', { timeZone: timezone });
+        await db().begin(async tx => {
+            await tx `update companies set settings=${tx.json(settings)},timezone=${timezone} where id=${c.id}`;
+            await audit(tx, u, c.id, 'Company workspace settings updated');
+        });
+        revalidatePath('/', 'layout');
+    } catch (error) { rethrowActionError(error); }
+}
 export async function changePassword(f) {
     try {
         const u = await requireUser(), current = passwordInput(f.get('current')), next = z.string().min(8).max(256).parse(f.get('next'));
@@ -322,14 +383,28 @@ export async function saveBusinessRecord(f) {
     try {
         const slug=text(f,'slug',70), moduleId=text(f,'module',100), {u,c}=await workspace(slug,moduleId,true);
         await limitWrite(u.id,c.id,'business-record');
-        const recordId=f.get('record')?id(f,'record'):null, title=text(f,'title',180);
-        const data={title,reference:String(f.get('reference')??'').trim().slice(0,100),contact:String(f.get('contact')??'').trim().slice(0,160),status:String(f.get('status')??'Open').trim().slice(0,60)||'Open',date:String(f.get('date')??'').slice(0,10),amount:String(f.get('amount')??'').trim().slice(0,30),description:String(f.get('description')??'').trim().slice(0,5000)};
+        const recordId=f.get('record')?id(f,'record'):null, title=text(f,'title',180), settings=c.settings??{};
+        let reference=String(f.get('reference')??'').trim().slice(0,100);
+        if(!reference&&settings.referencePrefix) reference=settings.referencePrefix+'-'+randomBytes(3).toString('hex').toUpperCase();
+        else if(reference&&settings.referencePrefix&&!reference.startsWith(settings.referencePrefix+'-')) reference=settings.referencePrefix+'-'+reference;
+        const status=String(f.get('status')??settings.defaultRecordStatus??'Open').trim().slice(0,60)||'Open';
+        const data={title,reference,contact:String(f.get('contact')??'').trim().slice(0,160),status,date:String(f.get('date')??'').slice(0,10),amount:String(f.get('amount')??'').trim().slice(0,30),description:String(f.get('description')??'').trim().slice(0,5000)};
         if(data.date&&!/^\d{4}-\d{2}-\d{2}$/.test(data.date))throw Error('Enter a valid date');
+        const file=await upload(f.get('attachment'));
+        let savedId=recordId;
         await db().begin(async tx=>{
             if(recordId) {
-                const [row]=await tx `update business_records set data=${tx.json(data)} where id=${recordId} and company_id=${c.id} and module_id=${moduleId} returning id`;
+                const [row]=await tx \`update business_records set data=\${tx.json(data)} where id=\${recordId} and company_id=\${c.id} and module_id=\${moduleId} returning id\`;
                 if(!row)throw Error('Record not found');
-            } else await tx `insert into business_records(company_id,module_id,data,created_by) values(${c.id},${moduleId},${tx.json(data)},${u.id})`;
+            } else {
+                const [row]=await tx \`insert into business_records(company_id,module_id,data,created_by) values(\${c.id},\${moduleId},\${tx.json(data)},\${u.id}) returning id\`;
+                savedId=row.id;
+            }
+            if(file){
+                const [count]=await tx \`select count(*)::int n from files where business_record_id=\${savedId} and company_id=\${c.id}\`;
+                if(count.n>=5)throw Error('A record can have up to five attachments.');
+                await tx \`insert into files(company_id,business_record_id,name,mime,data) values(\${c.id},\${savedId},\${file.name},\${file.mime},\${file.data})\`;
+            }
         });
         revalidatePath('/','layout');
     } catch(error) { rethrowActionError(error); }
