@@ -64,7 +64,7 @@ export default async function Page({ params, searchParams }) {
     if (path[0] === 'notifications' && path.length === 1)
         return <Shell u={u}><NotificationList u={u}/></Shell>;
     if (path[0] === 'admin') {
-        await admin();
+        await admin(u);
         let content;
         if (path.length === 1) {
             const companies = await db() `select c.*,(select count(*)::int from memberships m where m.company_id=c.id) members from companies c where (${q.q ?? ''}='' or c.name ilike ${'%' + (q.q ?? '') + '%'}) and (${q.status ?? ''}='' or c.status=${q.status ?? ''}) order by c.created_at desc`;
@@ -87,7 +87,7 @@ export default async function Page({ params, searchParams }) {
         return <Shell u={u}>{content}</Shell>;
     }
     if (path[0] === 'c' && path[1]) {
-        const moduleId = path[2], { c, role } = await workspace(path[1], moduleId || 'company-overview');
+        const moduleId = path[2], { c, role } = await workspace(path[1], moduleId || 'company-overview', false, false, u);
         let content;
         if (!moduleId || moduleId === 'company-overview') {
             const modules = await db() `select * from modules where company_id=${c.id} and enabled`;
