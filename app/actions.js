@@ -394,16 +394,16 @@ export async function saveBusinessRecord(f) {
         let savedId=recordId;
         await db().begin(async tx=>{
             if(recordId) {
-                const [row]=await tx \`update business_records set data=\${tx.json(data)} where id=\${recordId} and company_id=\${c.id} and module_id=\${moduleId} returning id\`;
+                const [row]=await tx `update business_records set data=${tx.json(data)} where id=${recordId} and company_id=${c.id} and module_id=${moduleId} returning id`;
                 if(!row)throw Error('Record not found');
             } else {
-                const [row]=await tx \`insert into business_records(company_id,module_id,data,created_by) values(\${c.id},\${moduleId},\${tx.json(data)},\${u.id}) returning id\`;
+                const [row]=await tx `insert into business_records(company_id,module_id,data,created_by) values(${c.id},${moduleId},${tx.json(data)},${u.id}) returning id`;
                 savedId=row.id;
             }
             if(file){
-                const [count]=await tx \`select count(*)::int n from files where business_record_id=\${savedId} and company_id=\${c.id}\`;
+                const [count]=await tx `select count(*)::int n from files where business_record_id=${savedId} and company_id=${c.id}`;
                 if(count.n>=5)throw Error('A record can have up to five attachments.');
-                await tx \`insert into files(company_id,business_record_id,name,mime,data) values(\${c.id},\${savedId},\${file.name},\${file.mime},\${file.data})\`;
+                await tx `insert into files(company_id,business_record_id,name,mime,data) values(${c.id},${savedId},${file.name},${file.mime},${file.data})`;
             }
         });
         revalidatePath('/','layout');
