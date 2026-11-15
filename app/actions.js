@@ -307,6 +307,7 @@ export async function saveCompanySettings(f) {
         const email = String(f.get('officeEmail') ?? '').trim().toLowerCase().slice(0,254);
         if (email) z.email().parse(email);
         const settings = {
+            ...(c.settings && typeof c.settings === 'object' ? c.settings : {}),
             officeEmail: email,
             officePhone: String(f.get('officePhone') ?? '').trim().slice(0,40),
             officeAddress: String(f.get('officeAddress') ?? '').trim().slice(0,250),
@@ -325,6 +326,53 @@ export async function saveCompanySettings(f) {
         revalidatePath('/', 'layout');
     } catch (error) { rethrowActionError(error); }
 }
+export async function saveSpreadsheetLink(f) {
+    try {
+        const u = await admin();
+        const company = id(f, 'company');
+        const category = text(f, 'category', 80);
+        const title = text(f, 'title', 160);
+        const rawUrl = z.string().url().max(2048).parse(String(f.get('url') ?? '').trim());
+        const parsedUrl = new URL(rawUrl);
+        if (parsedUrl.protocol !== 'https:') throw Error('Spreadsheet links must use HTTPS.');
+        const entry = { id: randomBytes(10).toString('hex'), category, title, url: parsedUrl.toString() };
+        await limitWrite(u.id, company, 'spreadsheet-link');
+        await db().begin(async tx => {
+            const [c] = await tx`select settings from companies where id=${company} for update`;
+            if (!c) throw Error('Company not found');
+            const settings = c.settings && typeof c.settings === 'object' ? c.settings : {};
+            const links = Array.isArray(settings.spreadsheetLinks) ? settings.spreadsheetLinks : [];
+            if (links.length >= 100) throw Error('This company has reached the 100 spreadsheet link limit.');
+            if (links.some(link => link.url === entry.url)) throw Error('That spreadsheet link has already been added.');
+            await tx`update companies set settings=${tx.json({...settings, spreadsheetLinks:[...links, entry]})} where id=${company}`;
+            await audit(tx, u, company, 'Spreadsheet link added: ' + category + ' / ' + title);
+        });
+        revalidatePath('/', 'layout');
+        redirect('/admin/company/' + company + '?sheets=1');
+    } catch (error) { rethrowActionError(error); }
+}
+
+export async function deleteSpreadsheetLink(f) {
+    try {
+        const u = await admin();
+        const company = id(f, 'company');
+        const linkId = z.string().regex(/^[a-f0-9]{20}$/).parse(f.get('link'));
+        await limitWrite(u.id, company, 'spreadsheet-link-delete');
+        await db().begin(async tx => {
+            const [c] = await tx`select settings from companies where id=${company} for update`;
+            if (!c) throw Error('Company not found');
+            const settings = c.settings && typeof c.settings === 'object' ? c.settings : {};
+            const links = Array.isArray(settings.spreadsheetLinks) ? settings.spreadsheetLinks : [];
+            const remaining = links.filter(link => link.id !== linkId);
+            if (remaining.length === links.length) throw Error('Spreadsheet link not found');
+            await tx`update companies set settings=${tx.json({...settings, spreadsheetLinks:remaining})} where id=${company}`;
+            await audit(tx, u, company, 'Spreadsheet link removed');
+        });
+        revalidatePath('/', 'layout');
+        redirect('/admin/company/' + company + '?sheets=1');
+    } catch (error) { rethrowActionError(error); }
+}
+
 export async function changePassword(f) {
     try {
         const u = await requireUser(), current = passwordInput(f.get('current')), next = z.string().min(8).max(256).parse(f.get('next'));
