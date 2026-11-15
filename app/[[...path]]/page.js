@@ -9,7 +9,7 @@ import Submit from '../submit';
 import { redirect, notFound } from 'next/navigation';
 import { db } from '../../lib/db.mjs';
 import { user, admin, requireUser, workspace, ticketAccess } from '../../lib/auth.mjs';
-import { catalog, roles, statuses, priorities, categories, canWrite, canManage, canSelectModule } from '../../lib/catalog.mjs';
+import { catalog, roles, statuses, priorities, categories, canWrite, canManage, canSelectModule, canEnableModule } from '../../lib/catalog.mjs';
 import * as A from '../actions';
 export const dynamic = 'force-dynamic';
 const Field = ({ label, name, value = '', type = 'text', required = false, ...rest }) => <label>{label}<input name={name} type={type} defaultValue={value} required={required} maxLength={type === 'password' ? 256 : undefined} {...rest}/></label>;
