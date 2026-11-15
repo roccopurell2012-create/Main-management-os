@@ -316,7 +316,7 @@ export async function saveBusinessRecord(f) {
         await limitWrite(u.id,c.id,'business-record');
         const recordId=f.get('record')?id(f,'record'):null, title=text(f,'title',180);
         const data={title,reference:String(f.get('reference')??'').trim().slice(0,100),contact:String(f.get('contact')??'').trim().slice(0,160),status:String(f.get('status')??'Open').trim().slice(0,60)||'Open',date:String(f.get('date')??'').slice(0,10),amount:String(f.get('amount')??'').trim().slice(0,30),description:String(f.get('description')??'').trim().slice(0,5000)};
-        if(data.date&&!/^\\d{4}-\\d{2}-\\d{2}$/.test(data.date))throw Error('Enter a valid date');
+        if(data.date&&!/^\d{4}-\d{2}-\d{2}$/.test(data.date))throw Error('Enter a valid date');
         await db().begin(async tx=>{
             if(recordId) {
                 const [row]=await tx `update business_records set data=${tx.json(data)} where id=${recordId} and company_id=${c.id} and module_id=${moduleId} returning id`;
