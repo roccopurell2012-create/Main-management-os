@@ -97,6 +97,20 @@ export async function saveCompany(f) {
         rethrowActionError(error);
     }
 }
+export async function toggleModule(f) {
+    try {
+        const u = await admin(), company = id(f, 'company'), moduleId = text(f, 'module');
+        if (!catalog.some(item => item.id === moduleId) || !canSelectModule(moduleId))
+            throw Error('This module cannot be enabled');
+        await limitWrite(u.id, company, 'module-toggle');
+        const enabled = f.get('enabled') === 'on';
+        await db().begin(async (tx) => {
+            await tx `insert into modules(company_id,module_id,enabled) values(${company},${moduleId},${enabled}) on conflict(company_id,module_id) do update set enabled=excluded.enabled`;
+            await audit(tx, u, company, 'Module ' + (enabled ? 'enabled: ' : 'disabled: ') + moduleId);
+        });
+        revalidatePath('/', 'layout');
+    } catch (error) { rethrowActionError(error); }
+}
 export async function saveModule(f) {
     try {
         const u = await admin(), company = id(f, 'company'), moduleId = text(f, 'module');
@@ -294,4 +308,29 @@ export async function setupInitialWorkspace() {
     revalidatePath('/','layout');
     redirect('/admin/company/'+result.company.id);
   } catch(error) {rethrowActionError(error)}
+}
+
+export async function saveBusinessRecord(f) {
+    try {
+        const slug=text(f,'slug',70), moduleId=text(f,'module',100), {u,c}=await workspace(slug,moduleId,true);
+        await limitWrite(u.id,c.id,'business-record');
+        const recordId=f.get('record')?id(f,'record'):null, title=text(f,'title',180);
+        const data={title,reference:String(f.get('reference')??'').trim().slice(0,100),contact:String(f.get('contact')??'').trim().slice(0,160),status:String(f.get('status')??'Open').trim().slice(0,60)||'Open',date:String(f.get('date')??'').slice(0,10),amount:String(f.get('amount')??'').trim().slice(0,30),description:String(f.get('description')??'').trim().slice(0,5000)};
+        if(data.date&&!/^\\d{4}-\\d{2}-\\d{2}$/.test(data.date))throw Error('Enter a valid date');
+        await db().begin(async tx=>{
+            if(recordId) {
+                const [row]=await tx `update business_records set data=${tx.json(data)} where id=${recordId} and company_id=${c.id} and module_id=${moduleId} returning id`;
+                if(!row)throw Error('Record not found');
+            } else await tx `insert into business_records(company_id,module_id,data,created_by) values(${c.id},${moduleId},${tx.json(data)},${u.id})`;
+        });
+        revalidatePath('/','layout');
+    } catch(error) { rethrowActionError(error); }
+}
+export async function deleteBusinessRecord(f) {
+    try {
+        const slug=text(f,'slug',70), moduleId=text(f,'module',100), {u,c}=await workspace(slug,moduleId,true);
+        await limitWrite(u.id,c.id,'business-record');
+        await db() `delete from business_records where id=${id(f,'record')} and company_id=${c.id} and module_id=${moduleId}`;
+        revalidatePath('/','layout');
+    } catch(error) { rethrowActionError(error); }
 }
