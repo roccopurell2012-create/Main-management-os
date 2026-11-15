@@ -23,3 +23,5 @@ aside .wordmark{font-size:16px;letter-spacing:1px;overflow-wrap:anywhere}
 
 .coming-soon{background:#f3f4ee}.coming-soon:hover{transform:none;border-color:var(--line)}
 .module-settings summary .badge{float:none;white-space:normal;margin-top:6px}
+
+.danger{background:#9d3028;color:#fff}.danger:hover{background:#7f241e}
