@@ -17,27 +17,34 @@ const text = (f, k, max = 500) => z.string().trim().min(1).max(max).parse(f.get(
 const id = (f, k) => z.uuid().parse(f.get(k));
 async function audit(tx, u, c, action) { await tx `insert into audit_events(actor_id,company_id,action) values(${u.id},${c},${action})`; }
 export async function login(f) {
-    let loginStage = 'validate-input';
+    let loginStage = 'validate-input', loginPath = '/login';
     try {
         const email = z.email().max(254).parse(text(f, 'email', 254)).toLowerCase(), password = passwordInput(f.get('password'));
+        const companySlug = f.get('companySlug') ? z.string().regex(/^[a-z0-9]+(-[a-z0-9]+)*$/).max(70).parse(f.get('companySlug')) : null;
+        loginPath = companySlug ? '/c/' + companySlug + '/login' : '/login';
         loginStage = 'rate-limit';
-        // Trust forwarded addresses only on the intended Vercel ingress, which overwrites this header.
         const source = process.env.VERCEL === '1' ? (await headers()).get('x-forwarded-for')?.split(',')[0]?.trim() : 'local';
         if (!await rateLimit('login-global', 'all', 120, 60) || !await rateLimit('login-source', source || 'unknown', 20, 60) || !await rateLimit('login-email', email, 10, 900))
-            redirect('/login?error=rate');
+            redirect(loginPath + '?error=rate');
         loginStage = 'user-lookup';
         const sql = db(), [u] = await sql `select * from users where email=${email} and not disabled`;
         loginStage = 'password-check';
         const valid = await verifyPassword(password, u?.password_hash ?? DUMMY_HASH);
         if (!u || !valid)
-            redirect('/login?error=invalid');
+            redirect(loginPath + '?error=invalid');
+        if (companySlug) {
+            loginStage = 'company-membership';
+            const [access] = await sql `select c.id from companies c where c.slug=${companySlug} and c.status='active' and (${u.platform_admin} or exists(select 1 from memberships m where m.company_id=c.id and m.user_id=${u.id}))`;
+            if (!access)
+                redirect(loginPath + '?error=invalid');
+        }
         if (!u.password_hash.startsWith('scrypt-v1:'))
             await sql `update users set password_hash=${await passwordHash(password)} where id=${u.id}`;
         loginStage = 'session-write';
         const token = randomBytes(32).toString('hex');
         await sql `insert into sessions(token_hash,user_id,expires_at) values(${tokenHash(token)},${u.id},now()+interval '12 hours')`;
         (await cookies()).set('portal_session', token, { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax', path: '/', maxAge: 43200 });
-        redirect('/');
+        redirect(companySlug ? '/c/' + companySlug : '/');
     }
     catch (error) {
         if (!(typeof error?.digest === 'string' && error.digest.startsWith('NEXT_REDIRECT;'))) {
