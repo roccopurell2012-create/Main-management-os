@@ -11,7 +11,7 @@ import { db } from '../lib/db.mjs';
 import { admin, requireUser, workspace, ticketAccess } from '../lib/auth.mjs';
 import { passwordHash, verifyPassword, tokenHash, passwordInput, DUMMY_HASH } from '../lib/password.mjs';
 import { roles, statuses, priorities, categories, catalog, canAssignRole, canSelectModule, defaultModuleSelection } from '../lib/catalog.mjs';
-import { rateLimit, limitWrite } from '../lib/rate-limit.mjs';
+import { rateLimit, loginRateLimit, limitWrite } from '../lib/rate-limit.mjs';
 import { upload } from '../lib/uploads.mjs';
 const text = (f, k, max = 500) => z.string().trim().min(1).max(max).parse(f.get(k));
 const id = (f, k) => z.uuid().parse(f.get(k));
@@ -24,21 +24,21 @@ export async function login(f) {
         loginPath = companySlug ? '/c/' + companySlug + '/login' : '/login';
         loginStage = 'rate-limit';
         const source = process.env.VERCEL === '1' ? (await headers()).get('x-forwarded-for')?.split(',')[0]?.trim() : 'local';
-        if (!await rateLimit('login-global', 'all', 120, 60) || !await rateLimit('login-source', source || 'unknown', 20, 60) || !await rateLimit('login-email', email, 10, 900))
+        if (!await loginRateLimit(email, source || 'unknown'))
             redirect(loginPath + '?error=rate');
-        loginStage = 'user-lookup';
-        const sql = db(), [u] = await sql `select * from users where email=${email} and not disabled`;
+        loginStage = 'account-and-membership-lookup';
+        const sql = db();
+        const [u] = await sql `select u.*,
+          (not ${Boolean(companySlug)} or exists(
+            select 1 from companies c where c.slug=${companySlug ?? ''} and c.status='active'
+              and (u.platform_admin or exists(select 1 from memberships m where m.company_id=c.id and m.user_id=u.id))
+          )) as company_login_allowed
+          from users u where u.email=${email} and not u.disabled`;
         loginStage = 'password-check';
         const valid = await verifyPassword(password, u?.password_hash ?? DUMMY_HASH);
-        if (!u || !valid)
+        if (!u || !valid || !u.company_login_allowed)
             redirect(loginPath + '?error=invalid');
-        if (companySlug) {
-            loginStage = 'company-membership';
-            const [access] = await sql `select c.id from companies c where c.slug=${companySlug} and c.status='active' and (${u.platform_admin} or exists(select 1 from memberships m where m.company_id=c.id and m.user_id=${u.id}))`;
-            if (!access)
-                redirect(loginPath + '?error=invalid');
-        }
-        if (!u.password_hash.startsWith('scrypt-v1:'))
+        if (!u.password_hash.startsWith('scrypt-v2:'))
             await sql `update users set password_hash=${await passwordHash(password)} where id=${u.id}`;
         loginStage = 'session-write';
         const rememberMe = f.get('rememberMe') === 'on';
@@ -137,7 +137,7 @@ export async function saveMember(f) {
         }
         const email = z.email().parse(text(f, 'email', 254)).toLowerCase(), name = text(f, 'name', 120), role = z.enum(roles).parse(f.get('role')), password = String(f.get('password') || '');
         if (password)
-            passwordInput(password, 14);
+            passwordInput(password, 8);
         await limitWrite(u.id, company, 'membership');
         await db().begin(async (tx) => {
             let [member] = await tx `select id from users where email=${email}`;
@@ -147,7 +147,7 @@ export async function saveMember(f) {
                     throw Error('Ask the platform administrator to enroll an existing account');
             }
             if (!member) {
-                if (password.length < 14)
+                if (password.length < 8)
                     throw Error('New accounts require a password of at least 14 characters');
                 [member] = await tx `insert into users(email,name,password_hash) values(${email},${name},${await passwordHash(password)}) returning id`;
             }
@@ -258,7 +258,7 @@ export async function markRead() {
 }
 export async function changePassword(f) {
     try {
-        const u = await requireUser(), current = passwordInput(f.get('current')), next = z.string().min(14).max(256).parse(f.get('next'));
+        const u = await requireUser(), current = passwordInput(f.get('current')), next = z.string().min(8).max(256).parse(f.get('next'));
         if (!await rateLimit('password-change', u.id, 5, 900))
             throw Error('Please wait before trying again');
         if (!await verifyPassword(current, u.password_hash))
