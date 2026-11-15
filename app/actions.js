@@ -41,9 +41,11 @@ export async function login(f) {
         if (!u.password_hash.startsWith('scrypt-v1:'))
             await sql `update users set password_hash=${await passwordHash(password)} where id=${u.id}`;
         loginStage = 'session-write';
+        const rememberMe = f.get('rememberMe') === 'on';
+        const sessionSeconds = rememberMe ? 30 * 24 * 60 * 60 : 12 * 60 * 60;
         const token = randomBytes(32).toString('hex');
-        await sql `insert into sessions(token_hash,user_id,expires_at) values(${tokenHash(token)},${u.id},now()+interval '12 hours')`;
-        (await cookies()).set('portal_session', token, { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax', path: '/', maxAge: 43200 });
+        await sql `insert into sessions(token_hash,user_id,expires_at) values(${tokenHash(token)},${u.id},now()+(${sessionSeconds} * interval '1 second'))`;
+        (await cookies()).set('portal_session', token, { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax', path: '/', maxAge: sessionSeconds });
         redirect(companySlug ? '/c/' + companySlug : '/');
     }
     catch (error) {
@@ -256,6 +258,34 @@ export async function changePassword(f) {
     }
 }
 
+export async function deleteCompany(f) {
+    try {
+        const u = await admin();
+        await limitWrite(u.id, 'platform', 'company-delete');
+        const companyId = id(f, 'company');
+        const confirmSlug = z.string().trim().min(1).max(70).parse(f.get('confirmSlug'));
+        await db().begin(async (tx) => {
+            const [c] = await tx `select id,slug from companies where id=${companyId} for update`;
+            if (!c || c.slug !== confirmSlug)
+                throw Error('Company confirmation did not match');
+            await tx `delete from business_records where company_id=${c.id}`;
+            await tx `delete from notifications where company_id=${c.id}`;
+            await tx `delete from files where company_id=${c.id}`;
+            await tx `delete from messages where company_id=${c.id}`;
+            await tx `delete from tickets where company_id=${c.id}`;
+            await tx `delete from modules where company_id=${c.id}`;
+            await tx `delete from memberships where company_id=${c.id}`;
+            await tx `delete from audit_events where company_id=${c.id}`;
+            await tx `delete from companies where id=${c.id}`;
+            await audit(tx, u, null, 'Company deleted');
+        });
+        revalidatePath('/', 'layout');
+        redirect('/admin');
+    }
+    catch (error) {
+        rethrowActionError(error);
+    }
+}
 export async function setupInitialWorkspace() {
   try {
     const u=await admin();
