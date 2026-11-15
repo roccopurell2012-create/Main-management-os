@@ -358,6 +358,8 @@ export async function requestPasswordReset(f) {
         const email = z.email().max(254).parse(text(f, 'email', 254)).toLowerCase();
         const rawCompanySlug = String(f.get('companySlug') ?? '');
         const requestedCompany = rawCompanySlug ? z.string().regex(/^[a-z0-9]+(-[a-z0-9]+)*$/).max(70).parse(rawCompanySlug) : null;
+        if (!process.env.RESEND_API_KEY || !process.env.RESEND_FROM_EMAIL)
+            redirect('/forgot-password?unavailable=1' + (requestedCompany ? '&company=' + requestedCompany : ''));
         const source = process.env.VERCEL === '1' ? (await headers()).get('x-forwarded-for')?.split(',')[0]?.trim() : 'local';
         if (!await rateLimit('password-reset-email', email, 4, 900) || !await rateLimit('password-reset-source', source || 'unknown', 20, 900))
             redirect('/forgot-password?sent=1');
@@ -372,10 +374,6 @@ export async function requestPasswordReset(f) {
             await tx `delete from password_reset_tokens where user_id=${account.id}`;
             await tx `insert into password_reset_tokens(token_hash,user_id,company_slug,expires_at) values(${hashed},${account.id},${companySlug},now()+interval '30 minutes')`;
         });
-        if (!process.env.RESEND_API_KEY || !process.env.RESEND_FROM_EMAIL) {
-            console.error('password-reset-email-not-configured');
-            throw new Error('Password reset email is not configured yet.');
-        }
         const baseUrl = (process.env.APP_BASE_URL || 'https://rocco-creations-portal.vercel.app').replace(/\/+$/, '');
         const resetUrl = baseUrl + '/reset-password?token=' + token;
         const response = await fetch('https://api.resend.com/emails', {
@@ -392,7 +390,7 @@ export async function requestPasswordReset(f) {
         });
         if (!response.ok) {
             console.error('password-reset-email-failed', { status: response.status });
-            throw new Error('Password reset email could not be sent.');
+            redirect('/forgot-password?unavailable=1' + (requestedCompany ? '&company=' + requestedCompany : ''));
         }
         redirect('/forgot-password?sent=1');
     } catch (error) { rethrowActionError(error); }
